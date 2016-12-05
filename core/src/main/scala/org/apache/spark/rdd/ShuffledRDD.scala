@@ -29,6 +29,7 @@ private[spark] class ShuffledRDDPartition(val idx: Int) extends Partition {
   override def hashCode(): Int = index
 
   override def equals(other: Any): Boolean = super.equals(other)
+
 }
 
 /**

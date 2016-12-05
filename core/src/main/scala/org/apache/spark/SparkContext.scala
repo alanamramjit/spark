@@ -268,6 +268,13 @@ class SparkContext(config: SparkConf) extends Logging {
     val map: ConcurrentMap[Int, RDD[_]] = new MapMaker().weakValues().makeMap[Int, RDD[_]]()
     map.asScala
   }
+
+  // Keeps a map of lineages to RDD ids
+  private[spark] val lineageMap = {
+    val map: ConcurrentMap[RDDLineage, Int] =
+      new MapMaker().weakValues().makeMap[RDDLineage, Int]()
+    map.asScala
+  }
   private[spark] def jobProgressListener: JobProgressListener = _jobProgressListener
 
   def statusTracker: SparkStatusTracker = _statusTracker
@@ -1646,6 +1653,8 @@ class SparkContext(config: SparkConf) extends Logging {
    */
   def getPersistentRDDs: Map[Int, RDD[_]] = persistentRdds.toMap
 
+  def getLineageMap: Map[RDDLineage, Int] = lineageMap.toMap
+
   /**
    * :: DeveloperApi ::
    * Return information about blocks stored in all of the slaves
@@ -1702,6 +1711,13 @@ class SparkContext(config: SparkConf) extends Logging {
     persistentRdds(rdd.id) = rdd
   }
 
+  /**
+   * Add to lineage cache.
+   */
+
+   private[spark] def addLineage(lineage: RDDLineage, id: Int) {
+     lineageMap(lineage) = id
+   }
   /**
    * Unpersist an RDD from memory and/or disk storage
    */

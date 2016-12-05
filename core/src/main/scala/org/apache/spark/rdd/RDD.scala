@@ -364,7 +364,12 @@ abstract class RDD[T: ClassTag](
    */
   def map[U: ClassTag](f: T => U): RDD[U] = withScope {
     val cleanF = sc.clean(f)
-    new MapPartitionsRDD[U, T](this, (context, pid, iter) => iter.map(cleanF))
+    var child = new MapPartitionsRDD[U, T](this, (context, pid, iter) => iter.map(cleanF))
+    if(child.getStorageLevel == StorageLevel.NONE) {
+      sc.addLineage(RDDLineage(id, Transformation.MAP, Some(f)), child.id)
+      child.cache()
+    }
+    child
   }
 
   /**
@@ -373,7 +378,10 @@ abstract class RDD[T: ClassTag](
    */
   def flatMap[U: ClassTag](f: T => TraversableOnce[U]): RDD[U] = withScope {
     val cleanF = sc.clean(f)
-    new MapPartitionsRDD[U, T](this, (context, pid, iter) => iter.flatMap(cleanF))
+    var child = new MapPartitionsRDD[U, T](this, (context, pid, iter) => iter.flatMap(cleanF))
+    sc.addLineage(RDDLineage(id, Transformation.FLATMAP, Some(f)), child.id)
+    child.cache()
+    child
   }
 
   /**
@@ -381,17 +389,31 @@ abstract class RDD[T: ClassTag](
    */
   def filter(f: T => Boolean): RDD[T] = withScope {
     val cleanF = sc.clean(f)
-    new MapPartitionsRDD[T, T](
+    var child = new MapPartitionsRDD[T, T](
       this,
       (context, pid, iter) => iter.filter(cleanF),
       preservesPartitioning = true)
+    sc.addLineage(RDDLineage(id, Transformation.MAP, Some(f)), child.id)
+    child.cache()
+    child
   }
 
   /**
    * Return a new RDD containing the distinct elements in this RDD.
    */
   def distinct(numPartitions: Int)(implicit ord: Ordering[T] = null): RDD[T] = withScope {
-    map(x => (x, null)).reduceByKey((x, y) => x, numPartitions).map(_._1)
+    var lineage = RDDLineage(id, Transformation.DISTINCT, None)
+    var child = sc.lineageMap.get(lineage)
+    child match {
+      case None => var child =
+        map(x => (x, null)).reduceByKey((x, y) => x, numPartitions).map(_._1)
+        sc.addLineage(RDDLineage(id, Transformation.DISTINCT, None), child.id)
+        child.cache()
+        child
+      case Some(id) => var child = sc.persistentRdds.getOrElse(id,
+        map(x => (x, null)).reduceByKey((x, y) => x, numPartitions).map(_._1))
+        child.asInstanceOf[RDD[T]]
+    }
   }
 
   /**
