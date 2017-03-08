@@ -375,7 +375,6 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]] extends TreeNode[PlanT
       left.cleanArgs == right.cleanArgs &&
       (left.children, right.children).zipped.forall(_ sameResult _)
   }
-
   /**
    * All the attributes that are used for this plan.
    */

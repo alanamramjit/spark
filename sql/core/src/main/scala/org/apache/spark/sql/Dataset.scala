@@ -20,6 +20,7 @@ package org.apache.spark.sql
 import java.io.CharArrayWriter
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ArrayBuffer
 import scala.language.implicitConversions
 import scala.reflect.runtime.universe.TypeTag
 import scala.util.control.NonFatal
@@ -418,6 +419,70 @@ class Dataset[T] private[sql](
   // scalastyle:off println
   def printSchema(): Unit = println(schema.treeString)
   // scalastyle:on println
+
+  /**
+  * Takes another Dataset as an argument and returns true if it contains a subset of rows
+  * as this one.
+  */
+   def contains(query: DataFrame): Boolean = {
+  // Check that this view contains all the base tables of the subquery
+
+    if (!(query.queryExecution.analyzed.inputSet
+        .subsetOf(queryExecution.analyzed.inputSet))) {
+        return false
+      }
+    // Get equivalence class sets
+    val queryEquivalenceSets = generateEquivalenceSets
+    val viewEquivalenceSets = query.generateEquivalenceSets
+
+   // Equijoin subsumption test
+   if (!viewEquivalenceSets.forall{ viewSet =>
+      queryEquivalenceSets.exists(querySet => viewSet.subsetOf(querySet))
+    } ) { return false }
+
+    // Prune further based on subsumption and residual predicates, but this depends
+    // on DAG format
+    query.filterPredicates.forall( pred => filterPredicates.exists( vp => vp == pred))
+
+   }
+
+  lazy val filterPredicates = queryExecution.analyzed.collect{ case pred: Filter => pred }
+
+  def generateEquivalenceSets: Array[AttributeSet] = {
+    var attributes = new ArrayBuffer[AttributeSet]()
+    queryExecution.analyzed.inputSet
+      .foreach( attr => attributes += AttributeSet(attr))
+      /*
+       * Need to unfold this to cover more complex AND/OR expressions
+       * This test is more difficult if column equivalencies include ORs
+       * and relies on predicates being in CNF
+      */
+    var predicates = filterPredicates.map{ pred =>
+         pred.condition match {
+          case eq: EqualTo => if (eq.references.size == 2) {
+            var temp = eq.references.toSeq
+            (temp(0), temp(1))
+            }
+          case ens: EqualNullSafe => if (ens.references.size == 2) {
+            var temp = ens.references.toSeq
+            (temp(0), temp(1))
+            }
+          case _ =>
+          }
+        }
+
+    predicates.foreach{ case pred => pred match {
+        case (l: Attribute, r: Attribute) =>
+          var fst = attributes.indexWhere( elem => elem.contains(l))
+          var snd = attributes.indexWhere( elem => elem.contains(r))
+          if(fst != snd) {
+            attributes(fst) = attributes(fst) ++ attributes(snd)
+            attributes.remove(snd)
+            }
+        }
+     }
+    attributes.toArray
+  }
 
   /**
    * Prints the plans (logical and physical) to the console for debugging purposes.
