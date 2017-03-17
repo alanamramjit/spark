@@ -420,67 +420,130 @@ class Dataset[T] private[sql](
   def printSchema(): Unit = println(schema.treeString)
   // scalastyle:on println
 
-  /**
-  * Takes another Dataset as an argument and returns true if it contains a subset of rows
-  * as this one.
+ /*
+  * Takes another Dataset as an argument and returns false if it is not a superset
+  *  of the other query, otherwise rewrites it with itself as the base table
   */
    def contains(query: DataFrame): Boolean = {
-  // Check that this view contains all the base tables of the subquery
+    val queryPlan = query.queryExecution.analyzed
+    val viewPlan = queryExecution.analyzed
+    // Check that this view contains all the base tables of the subquery
+    if (!(queryPlan.inputSet.subsetOf(viewPlan.inputSet))) {
+      return false
+    }
+    val (qee, qre, qoe) = query.sortPredicates
+    val (vee, vre, voe) = sortPredicates
 
-    if (!(query.queryExecution.analyzed.inputSet
-        .subsetOf(queryExecution.analyzed.inputSet))) {
-        return false
-      }
-    // Get equivalence class sets
-    val queryEquivalenceSets = generateEquivalenceSets
-    val viewEquivalenceSets = query.generateEquivalenceSets
+    var qes = getEqualSets(queryPlan.inputSet, qee)
+    var ves = query.getEqualSets(viewPlan.inputSet, vee)
 
-   // Equijoin subsumption test
-   if (!viewEquivalenceSets.forall{ viewSet =>
-      queryEquivalenceSets.exists(querySet => viewSet.subsetOf(querySet))
+    // residual subsumption test
+    if (!vre.forall(qre.contains(_))) { return false }
+
+    // equality subsumption test
+    if (!ves.forall{ viewSet => viewSet.size > 1 &&
+      qes.exists(querySet => viewSet.subsetOf(querySet))
     } ) { return false }
 
-    // Prune further based on subsumption and residual predicates, but this depends
-    // on DAG format
-    query.filterPredicates.forall( pred => filterPredicates.exists( vp => vp == pred))
+    // range subsumption test
+    var queryBounds = getRangeBounds(qes, qre)
+    var rangeBounds = getRangeBounds(ves, vre)
 
+    if (!checkRangeBounds(queryBounds, rangeBounds)) { return false}
+
+    // set equality columns
+    // set ranges
+    // redirect output columns
+
+    // rewrite query
+
+    true
    }
 
-  lazy val filterPredicates = queryExecution.analyzed.collect{ case pred: Filter => pred }
+   lazy val filterPredicates = { queryExecution.analyzed.flatMap{
+        case Filter(cond, child) => splitAnd(cond)
+        case _ => Nil
+      }
+  }
 
-  def generateEquivalenceSets: Array[AttributeSet] = {
-    var attributes = new ArrayBuffer[AttributeSet]()
-    queryExecution.analyzed.inputSet
-      .foreach( attr => attributes += AttributeSet(attr))
-      /*
-       * Need to unfold this to cover more complex AND/OR expressions
-       * This test is more difficult if column equivalencies include ORs
-       * and relies on predicates being in CNF
-      */
-    var predicates = filterPredicates.map{ pred =>
-         pred.condition match {
-          case eq: EqualTo => if (eq.references.size == 2) {
-            var temp = eq.references.toSeq
-            (temp(0), temp(1))
-            }
-          case ens: EqualNullSafe => if (ens.references.size == 2) {
-            var temp = ens.references.toSeq
-            (temp(0), temp(1))
-            }
-          case _ =>
-          }
+  def checkRangeBounds(view: Seq[RangeBound], query: Seq[RangeBound]): Boolean = {
+    view.foreach{ vrb => query.find{ qry => vrb.cols.subsetOf(qry.cols)}.foreach{ qrb =>
+       if (vrb.min < qrb.min || vrb.max > qrb.max) { return false}
+      }
+    }
+    true
+  }
+
+
+  def getRangeBounds(cols: Seq[AttributeSet], ranges: Seq[Expression])
+    : Seq[RangeBound] = {
+      var rangeBounds = cols.map{ set =>
+        RangeBound(set, Float.MinValue, Float.MaxValue, false, false)}
+      ranges.foreach{
+        case GreaterThan(l: Attribute, r: Literal) =>
+          var temp = rangeBounds.find( _.cols.contains(l))
+          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Float]
+              if( num > rb.max) { rb.max = num ; rb.maxInclusive = false }
         }
+        case GreaterThanOrEqual(l: Attribute, r: Literal) =>
+          var temp = rangeBounds.find( _.cols.contains(l))
+          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Float]
+              if( num > rb.max) { rb.max = num ; rb.maxInclusive = true }
+         }
+         case LessThan(l: Attribute, r: Literal) =>
+          var temp = rangeBounds.find( _.cols.contains(l))
+          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Float]
+              if( num < rb.min) { rb.min = num ; rb.minInclusive = false }
+        }
+        case LessThanOrEqual(l: Attribute, r: Literal) =>
+          var temp = rangeBounds.find( _.cols.contains(l))
+          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Float]
+              if( num > rb.max) { rb.min = num ; rb.minInclusive = true }
+         }
+      }
+      rangeBounds
+  }
 
-    predicates.foreach{ case pred => pred match {
-        case (l: Attribute, r: Attribute) =>
+  def splitAnd(cond: Expression): Seq[Expression] = { cond match {
+     case And(cond1, cond2) => splitAnd(cond1) ++ splitAnd(cond2)
+     case otherExpr => otherExpr :: Nil
+     }
+   }
+
+   def sortPredicates: (Array[Expression], Array[Expression], Set[Expression]) = {
+     var equalSets = new ArrayBuffer[Expression]
+     var rangeSet = new ArrayBuffer[Expression]
+     var otherSet = new ArrayBuffer[Expression]
+     filterPredicates.foreach{ cond =>
+      cond match {
+        case EqualTo(l: Attribute, r: Attribute) => equalSets += cond
+        case EqualNullSafe(l: Attribute, r: Attribute) => equalSets += cond
+        case GreaterThan(l: Attribute, r: Literal) => rangeSet += cond
+        case GreaterThan(l: Literal, r: Attribute) => rangeSet += LessThanOrEqual(r, l)
+        case GreaterThanOrEqual(l: Attribute, r: Literal) => rangeSet += cond
+        case GreaterThanOrEqual(l: Literal, r: Attribute) => rangeSet += LessThan(r, l)
+        case LessThan(l: Attribute, r: Literal) => rangeSet += cond
+        case LessThan(l: Literal, r: Attribute) => rangeSet += GreaterThanOrEqual(r, l)
+        case LessThanOrEqual(l: Attribute, r: Literal) => rangeSet += cond
+        case LessThanOrEqual(l: Literal, r: Attribute) => rangeSet += GreaterThan(r, l)
+        case _ => otherSet += cond.canonicalized
+    }
+  }
+  (equalSets.toArray, rangeSet.toArray, otherSet.toSet)
+}
+
+ def getEqualSets(att: AttributeSet, equalExprs: Seq[Expression]): Array[AttributeSet] = {
+    var attributes = new ArrayBuffer[AttributeSet]
+    att.foreach( attr => attributes += AttributeSet(attr))
+    equalExprs.foreach{
+      case BinaryOperator(l: Attribute, r: Attribute) =>
           var fst = attributes.indexWhere( elem => elem.contains(l))
           var snd = attributes.indexWhere( elem => elem.contains(r))
           if(fst != snd) {
             attributes(fst) = attributes(fst) ++ attributes(snd)
             attributes.remove(snd)
-            }
+          }
         }
-     }
     attributes.toArray
   }
 
@@ -2902,3 +2965,6 @@ class Dataset[T] private[sql](
     }
   }
 }
+
+case class RangeBound(var cols: AttributeSet, var min: Float, var max: Float,
+ var minInclusive: Boolean, var maxInclusive: Boolean)
