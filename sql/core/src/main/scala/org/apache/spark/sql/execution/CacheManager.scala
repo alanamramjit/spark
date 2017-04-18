@@ -129,6 +129,14 @@ class CacheManager extends Logging {
     cachedData.find(cd => plan.sameResult(cd.plan))
   }
 
+  def searchCachedData(plan: LogicalPlan): Option[LogicalPlan] = readLock{
+    cachedData.foreach( cd => cd.plan.contains(plan) match {
+      case Some(newPlan) => return Some(newPlan)
+      case None =>
+    } )
+  None
+  }
+
   /** Replaces segments of the given logical plan with cached versions where possible. */
   def useCachedData(plan: LogicalPlan): LogicalPlan = {
     plan transformDown {
