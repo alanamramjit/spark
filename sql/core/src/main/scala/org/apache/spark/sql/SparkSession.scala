@@ -21,6 +21,7 @@ import java.beans.Introspector
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicReference
 
+import scala.collection.mutable.Queue
 import scala.collection.JavaConverters._
 import scala.reflect.ClassTag
 import scala.reflect.runtime.universe.TypeTag
@@ -36,7 +37,7 @@ import org.apache.spark.sql.catalog.Catalog
 import org.apache.spark.sql.catalyst._
 import org.apache.spark.sql.catalyst.encoders._
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
-import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, Range}
+import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, Range}
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.ui.SQLListener
@@ -217,6 +218,8 @@ class SparkSession private(
   /* --------------------------------- *
    |  Methods for creating DataFrames  |
    * --------------------------------- */
+
+   val queryList = new Queue[LogicalPlan]
 
   /**
    * Returns a [[DataFrame]] with no rows or columns.

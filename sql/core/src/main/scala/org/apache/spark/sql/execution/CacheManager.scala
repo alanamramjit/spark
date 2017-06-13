@@ -22,7 +22,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 import org.apache.hadoop.fs.{FileSystem, Path}
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan, Project}
 import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, LogicalRelation}
@@ -129,21 +129,30 @@ class CacheManager extends Logging {
     cachedData.find(cd => plan.sameResult(cd.plan))
   }
 
-  def searchCachedData(plan: LogicalPlan): Option[LogicalPlan] = readLock{
-    cachedData.foreach( cd => cd.plan.contains(plan) match {
-      case Some(newPlan) => return Some(newPlan)
-      case None =>
-    } )
-  None
+  def searchCachedData(plan: LogicalPlan): LogicalPlan = readLock{
+    cachedData.find( cd => cd.plan.contains(plan))
+    .map( cd => rewrite(plan, cd.cachedRepresentation)).getOrElse(plan)
+  }
+
+  def rewrite(plan: LogicalPlan, view: InMemoryRelation): LogicalPlan = {
+    var newPlan: LogicalPlan = view
+    val (qee, qre, qoe) = plan.sortPredicates
+    qee.foreach{ expr => newPlan = Filter(expr, newPlan) }
+    qre.foreach{ expr => newPlan = Filter(expr, newPlan) }
+    qoe.foreach{ expr => newPlan = Filter(expr, newPlan) }
+    var outputMap = plan.outputSet.toSeq
+    newPlan = Project(outputMap, newPlan)
+    newPlan
   }
 
   /** Replaces segments of the given logical plan with cached versions where possible. */
   def useCachedData(plan: LogicalPlan): LogicalPlan = {
+
+
     plan transformDown {
       case currentFragment =>
         lookupCachedData(currentFragment)
-          .map(_.cachedRepresentation.withOutput(currentFragment.output))
-          .getOrElse(currentFragment)
+        .map(_.cachedRepresentation.withOutput(currentFragment.output)).getOrElse(currentFragment)
     }
   }
 
