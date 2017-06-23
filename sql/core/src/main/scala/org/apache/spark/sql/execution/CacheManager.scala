@@ -135,13 +135,11 @@ class CacheManager extends Logging {
   }
 
   def rewrite(plan: LogicalPlan, view: InMemoryRelation): LogicalPlan = {
-    var newPlan: LogicalPlan = view
+    var newPlan: LogicalPlan = view.withOutput(plan.output)
     val (qee, qre, qoe) = plan.sortPredicates
     qee.foreach{ expr => newPlan = Filter(expr, newPlan) }
     qre.foreach{ expr => newPlan = Filter(expr, newPlan) }
     qoe.foreach{ expr => newPlan = Filter(expr, newPlan) }
-    var outputMap = plan.outputSet.toSeq
-    newPlan = Project(outputMap, newPlan)
     newPlan
   }
 
