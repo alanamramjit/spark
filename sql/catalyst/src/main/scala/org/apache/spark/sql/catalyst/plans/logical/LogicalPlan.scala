@@ -277,12 +277,18 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
    */
   def refresh(): Unit = children.foreach(_.refresh())
 
-  lazy val filterPredicates = { this.flatMap{
+  def splitAnd(cond: Expression): Seq[Expression] = {
+    cond match {
+     case And(cond1, cond2) => splitAnd(cond1) ++ splitAnd(cond2)
+     case otherExpr => otherExpr :: Nil
+     }
+  }
+
+   lazy val filterPredicates = { this.flatMap{
         case Filter(cond, child) => splitAnd(cond)
         case _ => Nil
       }
   }
-
   def findMapping(qSet: AttributeSet, vCols: Seq[AttributeSet])
     : Option[HashMap[Attribute, Attribute]] = {
     var projectList = new HashMap[Attribute, Attribute]
@@ -314,41 +320,35 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
     true
   }
 
+
   def getRangeBounds(attrSet: Seq[AttributeSet], ranges: Seq[Expression])
     : Seq[RangeBound] = {
       var rangeBounds = attrSet.map{ set =>
-        RangeBound(set, Float.MinValue, Float.MaxValue, false, false)}
+        RangeBound(set, Double.MinValue, Double.MaxValue, false, false)}
       ranges.foreach{
         case GreaterThan(l: Attribute, r) =>
           rangeBounds.find( rb => rb.cols.contains(l))
-          .foreach{ rb => var num = r.eval(null).asInstanceOf[Float]
+          .foreach{ rb => var num = r.eval(null).asInstanceOf[Double]
               if( num > rb.min) { rb.min = num ; rb.minInclusive = false }
         }
         case GreaterThanOrEqual(l: Attribute, r) =>
           var temp = rangeBounds.find( rb => rb.cols.contains(l))
-          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Float]
+          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Double]
               if( num > rb.min) { rb.min = num ; rb.minInclusive = true }
          }
          case LessThan(l: Attribute, r) =>
           var temp = rangeBounds.find( rb => rb.cols.contains(l))
-          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Float]
+          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Double]
               if( num < rb.max) { rb.min = num ; rb.maxInclusive = false }
         }
         case LessThanOrEqual(l: Attribute, r) =>
           var temp = rangeBounds.find( rb => rb.cols.contains(l))
-          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Long]
+          temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Double]
               if( num > rb.max) { rb.min = num ; rb.maxInclusive = true }
          }
       }
       rangeBounds
   }
-
-  def splitAnd(cond: Expression): Seq[Expression] = {
-    cond match {
-     case And(cond1, cond2) => splitAnd(cond1) ++ splitAnd(cond2)
-     case otherExpr => otherExpr :: Nil
-     }
-   }
 
    def sortPredicates: (Array[Expression], Array[Expression], Array[Expression]) = {
      var equalSets = new ArrayBuffer[Expression]
@@ -366,7 +366,7 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
         case LessThan(l, r: AttributeReference) => rangeSet += GreaterThanOrEqual(r, l)
         case cond @ LessThanOrEqual(l: AttributeReference, r) => rangeSet += cond
         case LessThanOrEqual(l, r: AttributeReference) => rangeSet += GreaterThan(r, l)
-        case _ => otherSet += cond.canonicalized
+        case other => otherSet += other
     }
   }
   (equalSets.toArray, rangeSet.toArray, otherSet.toArray)
@@ -387,87 +387,51 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
     attributes.toArray
   }
 
-/* Change to look only at root node and Join operands
-def contains(queryPlan: LogicalPlan): Option[LogicalPlan] = {
-  var mapNodes = this :: Nil
-  this.foreach{ node => node match {
-    case j: Join => mapNodes = node :: mapNodes
-    case _ =>
-  }
-  }
-
-  mapNodes.foreach(node => node._contains(queryPlan) match {
-    case Some(plan) => return Some(plan)
-    case None =>
-    } )
-  None
-}
-*/
-
-def contains(queryPlan: LogicalPlan): Boolean = {
+  def contains(queryPlan: LogicalPlan): Boolean = {
+    if (this == queryPlan) {
+     return false
+    }
 
     // Preliminary check that this view contains all the base tables of the subquery
-    if (!queryPlan.collectLeaves.toSet.subsetOf(collectLeaves.toSet)) {
-      return false
-    }
-
-    if (!queryPlan.outputSet.subsetOf(outputSet) || queryPlan.inputSet.subsetOf(outputSet)) {
-      return false
-    }
+    // Input set is all of the columns in the original base tables
+    var root = queryPlan.inputSet.subsetOf(inputSet)
+    // Test all projection references are can be calculated
+    root &= queryPlan.outputSet.subsetOf(outputSet)
 
     val (qee, qre, qoe) = queryPlan.sortPredicates
+    if (!root) {
+      return false
+    }
     val (vee, vre, voe) = sortPredicates
-
     var qes = queryPlan.getEqualSets(queryPlan.inputSet, qee)
     var ves = getEqualSets(inputSet, vee)
-
     // residual subsumption test -- ignore equivalence classes for now
-    val residualTest = voe.forall(expr => qoe.contains(expr))
-
+    val residualTest = voe.toSet.subsetOf(qoe.toSet)
     // equality subsumption test
     val equalityTest = ves.forall(viewSet => viewSet.size == 1 ||
           qes.exists(querySet => viewSet.subsetOf(querySet)))
-
     // range subsumption test
     var queryBounds = getRangeBounds(qes, qre)
     var viewBounds = getRangeBounds(ves, vre)
-
     val rangeTest = checkRangeBounds(viewBounds, queryBounds)
     if( !residualTest || !equalityTest || !rangeTest) {
       return false
     }
-
     return true
   }
 
-/*
-  def generateVariant(): String = {
-        val (vee, vre, voe) = sortPredicates
-        var projectList = queryExecution.analyzed.outputSet
-
-        val r = scala.util.Random
-        String temp = ""
-        vee.foreach{ expr => if (r.nextInt(100) >= 50) {
-            temp += expr.toString
-          }
-        }
-
-        vre.foreach{ expr => if (r.nextInt(100) >= 50) {
-            temp += expr.toString()
-          }
-        }
-
-        voe.foreach{ expr => if (r.nextInt(100) >= 50) {
-            temp += expr.toString()
-          }
-        }
-
-        temp
-
+  def rewrite(plan: LogicalPlan): LogicalPlan = {
+    var rewritten = false
+    transformDown {
+      case frag: Project => frag
+      case frag: Filter => frag
+      case frag if rewritten => frag
+      case node => rewritten = true
+                   plan
+    }
   }
-
-*/
 }
+
 /**
  * A logical plan node with no children.
  */
@@ -519,7 +483,6 @@ abstract class UnaryNode extends LogicalPlan {
       // (product of children).
       sizeInBytes = 1
     }
-
     child.statistics.copy(sizeInBytes = sizeInBytes)
   }
  }
@@ -533,5 +496,5 @@ abstract class BinaryNode extends LogicalPlan {
   override final def children: Seq[LogicalPlan] = Seq(left, right)
 }
 
-case class RangeBound(var cols: AttributeSet, var min: Float, var max: Float,
+case class RangeBound(var cols: AttributeSet, var min: Double, var max: Double,
  var minInclusive: Boolean, var maxInclusive: Boolean)

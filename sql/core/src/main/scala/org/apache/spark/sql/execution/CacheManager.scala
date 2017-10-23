@@ -22,6 +22,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 import org.apache.hadoop.fs.{FileSystem, Path}
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan, Project}
 import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.execution.columnar.InMemoryRelation
@@ -129,28 +130,29 @@ class CacheManager extends Logging {
     cachedData.find(cd => plan.sameResult(cd.plan))
   }
 
-  def searchCachedData(plan: LogicalPlan): LogicalPlan = readLock{
-    cachedData.find( cd => cd.plan.contains(plan))
-    .map( cd => rewrite(plan, cd.cachedRepresentation)).getOrElse(plan)
-  }
-
-  def rewrite(plan: LogicalPlan, view: InMemoryRelation): LogicalPlan = {
-    var newPlan: LogicalPlan = view.withOutput(plan.output)
-    val (qee, qre, qoe) = plan.sortPredicates
-    qee.foreach{ expr => newPlan = Filter(expr, newPlan) }
-    qre.foreach{ expr => newPlan = Filter(expr, newPlan) }
-    qoe.foreach{ expr => newPlan = Filter(expr, newPlan) }
-    newPlan
+  def searchCachedData(plan: LogicalPlan): Option[CachedData] = readLock{
+    cachedData.find(cd => cd.plan.contains(plan))
   }
 
   /** Replaces segments of the given logical plan with cached versions where possible. */
   def useCachedData(plan: LogicalPlan): LogicalPlan = {
-
-
-    plan transformDown {
+    var newPlan = searchCachedData(plan).map(cd => rewrite(cd.plan, plan)).getOrElse(plan)
+    newPlan transformDown {
       case currentFragment =>
         lookupCachedData(currentFragment)
-        .map(_.cachedRepresentation.withOutput(currentFragment.output)).getOrElse(currentFragment)
+        .map(_.cachedRepresentation.withOutput(currentFragment.output))
+        .getOrElse(currentFragment)
+    }
+  }
+
+  def rewrite(view: LogicalPlan, query: LogicalPlan): LogicalPlan = {
+    var rewritten = false
+    query transformDown {
+      case node: Project => node
+      case node: Filter => node
+      case node if rewritten => node
+      case node => rewritten = true
+                   view
     }
   }
 

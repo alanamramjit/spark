@@ -64,23 +64,20 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     sparkSession.sessionState.analyzer.execute(logical)
   }
 
-
   lazy val withCachedData: LogicalPlan = {
     assertAnalyzed()
     assertSupported()
-    var plan = sparkSession.sharedState.cacheManager.useCachedData(analyzed)
-    sparkSession.sharedState.cacheManager.searchCachedData(plan)
+    sparkSession.sharedState.cacheManager.useCachedData(analyzed)
   }
 
   lazy val optimizedPlan: LogicalPlan = {
     sparkSession.sessionState.optimizer.execute(withCachedData)
-
   }
 
   lazy val sparkPlan: SparkPlan = {
     SparkSession.setActiveSession(sparkSession)
     // TODO: We use next(), i.e. take the first plan returned by the planner, here for now,
-    //       but we will implement to choose the best plan.
+    //       but we will implement to optchoose the best plan.
     planner.plan(ReturnAnswer(optimizedPlan)).next()
   }
 
