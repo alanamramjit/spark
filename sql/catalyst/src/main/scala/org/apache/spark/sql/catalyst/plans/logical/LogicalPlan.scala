@@ -277,18 +277,6 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
    */
   def refresh(): Unit = children.foreach(_.refresh())
 
-  def splitAnd(cond: Expression): Seq[Expression] = {
-    cond match {
-     case And(cond1, cond2) => splitAnd(cond1) ++ splitAnd(cond2)
-     case otherExpr => otherExpr :: Nil
-     }
-  }
-
-   lazy val filterPredicates = { this.flatMap{
-        case Filter(cond, child) => splitAnd(cond)
-        case _ => Nil
-      }
-  }
   def findMapping(qSet: AttributeSet, vCols: Seq[AttributeSet])
     : Option[HashMap[Attribute, Attribute]] = {
     var projectList = new HashMap[Attribute, Attribute]
@@ -313,13 +301,13 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
   }
 
   def checkRangeBounds(view: Seq[RangeBound], query: Seq[RangeBound]): Boolean = {
-    view.foreach{ vrb => query.find{ qry => vrb.cols.subsetOf(qry.cols)}.foreach{ qrb =>
-       if (vrb.min > qrb.min || vrb.max < qrb.max) { return false}
+   view.foreach{ view_set => query.find{ query_set =>
+      view_set.cols.subsetOf(query_set.cols)}.map{ qrb =>
+       if (view_set.min > qrb.min || view_set.max < qrb.max) { return false}
       }
     }
     true
   }
-
 
   def getRangeBounds(attrSet: Seq[AttributeSet], ranges: Seq[Expression])
     : Seq[RangeBound] = {
@@ -334,17 +322,17 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
         case GreaterThanOrEqual(l: Attribute, r) =>
           var temp = rangeBounds.find( rb => rb.cols.contains(l))
           temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Double]
-              if( num > rb.min) { rb.min = num ; rb.minInclusive = true }
+              if( num >= rb.min) { rb.min = num ; rb.minInclusive = true }
          }
          case LessThan(l: Attribute, r) =>
           var temp = rangeBounds.find( rb => rb.cols.contains(l))
           temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Double]
-              if( num < rb.max) { rb.min = num ; rb.maxInclusive = false }
+              if( num < rb.max) { rb.max = num ; rb.maxInclusive = false }
         }
         case LessThanOrEqual(l: Attribute, r) =>
           var temp = rangeBounds.find( rb => rb.cols.contains(l))
           temp.foreach{ rb => var num = r.eval(null).asInstanceOf[Double]
-              if( num > rb.max) { rb.min = num ; rb.maxInclusive = true }
+              if( num < rb.max) { rb.max = num ; rb.maxInclusive = true }
          }
       }
       rangeBounds
@@ -354,7 +342,7 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
      var equalSets = new ArrayBuffer[Expression]
      var rangeSet = new ArrayBuffer[Expression]
      var otherSet = new ArrayBuffer[Expression]
-     filterPredicates.foreach{ cond =>
+     constraints.foreach{ cond =>
       cond match {
         case cond @ EqualTo(l: AttributeReference, r: AttributeReference) => equalSets += cond
         case cond @ EqualNullSafe(l: AttributeReference, r: AttributeReference) => equalSets += cond
@@ -394,14 +382,12 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
 
     // Preliminary check that this view contains all the base tables of the subquery
     // Input set is all of the columns in the original base tables
-    var root = queryPlan.inputSet.subsetOf(inputSet)
-    // Test all projection references are can be calculated
-    root &= queryPlan.outputSet.subsetOf(outputSet)
-
-    val (qee, qre, qoe) = queryPlan.sortPredicates
-    if (!root) {
+    if( !queryPlan.inputSet.subsetOf(inputSet) ||
+      !queryPlan.outputSet.subsetOf(outputSet)) {
       return false
     }
+
+    val (qee, qre, qoe) = queryPlan.sortPredicates
     val (vee, vre, voe) = sortPredicates
     var qes = queryPlan.getEqualSets(queryPlan.inputSet, qee)
     var ves = getEqualSets(inputSet, vee)
