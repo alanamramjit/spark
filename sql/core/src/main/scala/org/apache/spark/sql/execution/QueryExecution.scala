@@ -68,6 +68,7 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
     assertAnalyzed()
     assertSupported()
     sparkSession.sharedState.cacheManager.searchCachedData(analyzed)
+
   }
 
   lazy val withCachedData: LogicalPlan = {

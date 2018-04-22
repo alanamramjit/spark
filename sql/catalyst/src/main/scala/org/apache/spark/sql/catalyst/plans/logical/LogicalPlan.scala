@@ -277,6 +277,23 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
    */
   def refresh(): Unit = children.foreach(_.refresh())
 
+  def splitAnd(cond: Expression): Seq[Expression] = {
+    cond match {
+     case And(cond1, cond2) => splitAnd(cond1) ++ splitAnd(cond2)
+     case otherExpr => otherExpr :: Nil
+     }
+  }
+
+   lazy val filterPredicates = { this.flatMap{
+        case Filter(cond, child) => splitAnd(cond)
+        case Join(_, _, _, cond) => cond match {
+          case Some(expr) => splitAnd(expr)
+          case None => Nil
+          }
+        case _ => Nil
+      }
+  }
+
   def findMapping(qSet: AttributeSet, vCols: Seq[AttributeSet])
     : Option[HashMap[Attribute, Attribute]] = {
     var projectList = new HashMap[Attribute, Attribute]
@@ -342,12 +359,13 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
      var equalSets = new ArrayBuffer[Expression]
      var rangeSet = new ArrayBuffer[Expression]
      var otherSet = new ArrayBuffer[Expression]
-     constraints.foreach{ cond =>
+     filterPredicates.foreach{ cond =>
       cond match {
         case cond @ EqualTo(l: AttributeReference, r: AttributeReference) => equalSets += cond
-        case cond @ EqualNullSafe(l: AttributeReference, r: AttributeReference) => equalSets += cond
-        case cond @ GreaterThan(l: AttributeReference, r) => rangeSet += cond
-        case GreaterThan(l, r: AttributeReference) => rangeSet += LessThanOrEqual(r, l)
+        case cond @ EqualNullSafe(l: AttributeReference, r: AttributeReference) =>
+         equalSets += cond
+        case cond @ GreaterThan(l: NamedExpression, r) => rangeSet += cond
+        case GreaterThan(l, r: NamedExpression) => rangeSet += LessThanOrEqual(r, l)
         case cond @ GreaterThanOrEqual(l: AttributeReference, r) => rangeSet += cond
         case GreaterThanOrEqual(l, r: AttributeReference) => rangeSet += LessThan(r, l)
         case cond @ LessThan(l: AttributeReference, r) => rangeSet += cond
@@ -380,12 +398,12 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
      return false
     }
 
+    var queryPredicates = queryPlan.filterPredicates.diff(filterPredicates)
+
+    val filterReferences = AttributeSet(queryPredicates.flatMap(_.references)) ++
+     queryPlan.outputSet
     // Preliminary check that this view contains all the base tables of the subquery
     // Input set is all of the columns in the original base tables
-    if( !queryPlan.inputSet.subsetOf(inputSet) ||
-      !queryPlan.outputSet.subsetOf(outputSet)) {
-      return false
-    }
 
     val (qee, qre, qoe) = queryPlan.sortPredicates
     val (vee, vre, voe) = sortPredicates
@@ -400,21 +418,14 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
     var queryBounds = getRangeBounds(qes, qre)
     var viewBounds = getRangeBounds(ves, vre)
     val rangeTest = checkRangeBounds(viewBounds, queryBounds)
-    if( !residualTest || !equalityTest || !rangeTest) {
-      return false
-    }
-    return true
+    return residualTest && equalityTest && rangeTest
   }
 
-  def rewrite(plan: LogicalPlan): LogicalPlan = {
-    var rewritten = false
-    transformDown {
-      case frag: Project => frag
-      case frag: Filter => frag
-      case frag if rewritten => frag
-      case node => rewritten = true
-                   plan
-    }
+  def rewrite(query: LogicalPlan): LogicalPlan = {
+    var missingPredicates = query.filterPredicates.toSet.diff(filterPredicates.toSet)
+    var newPlan = this
+    missingPredicates.foreach{ expr => newPlan = Filter(expr, newPlan)}
+    Project(query.output, newPlan)
   }
 }
 

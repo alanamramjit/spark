@@ -131,7 +131,7 @@ class CacheManager extends Logging {
   }
 
   def searchCachedData(plan: LogicalPlan): LogicalPlan = readLock{
-    cachedData.find(cd => cd.plan.contains(plan)).map(cd => rewrite(cd.plan, plan)).getOrElse(plan)
+    cachedData.find(cd => cd.plan.contains(plan)).map(cd => cd.plan.rewrite(plan)).getOrElse(plan)
   }
 
   /** Replaces segments of the given logical plan with cached versions where possible. */
@@ -142,13 +142,6 @@ class CacheManager extends Logging {
         .map(_.cachedRepresentation.withOutput(currentFragment.output))
         .getOrElse(currentFragment)
     }
-  }
-
-  def rewrite(view: LogicalPlan, query: LogicalPlan): LogicalPlan = {
-    var newPlan = view
-    var missingPreds = query.constraints.diff(view.constraints)
-    missingPreds.foreach{ expr => newPlan = Filter(expr, newPlan)}
-    Project(newPlan, query.output)
   }
 
   /**
